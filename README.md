@@ -35,6 +35,16 @@ SUPABASE_SECRET_KEY=tu_clave_secreta
 SUPABASE_SECRET_KEYS=tu_clave_secreta
 ```
 
+Para lanzar ejecuciones desde la UI, agrega además:
+
+```env
+GITHUB_TOKEN=tu_github_pat
+GITHUB_REPOSITORY=jermaburgos/ProyectoBaseAutomatizacionSelenium
+GITHUB_WORKFLOW_FILE=run-single-test.yml
+GITHUB_WORKFLOW_REF=feature/webYourStore
+GITHUB_API_VERSION=2026-03-10
+```
+
 ## Instalación
 
 ```bash
@@ -71,6 +81,12 @@ Cada ejecución puede incluir:
 
 - Vista rápida: abre el reporte HTML dentro del dashboard.
 - Descarga: baja el archivo asociado directamente.
+
+## Lanzar ejecución
+
+La sección `Lanzar ejecución` muestra los casos únicos detectados en la base de datos y permite disparar el workflow de GitHub Actions enviando el `test_name` seleccionado.
+
+El backend expone `POST /api/github/dispatch` y usa las variables de entorno anteriores para llamar a la API de GitHub sin exponer el token en el navegador.
 
 ## Datos esperados
 

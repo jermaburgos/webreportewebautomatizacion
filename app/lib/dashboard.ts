@@ -341,6 +341,21 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function isRetryableSupabaseAuthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("PGRST303") || message.includes("JWT issued at future");
+}
+
+function formatTableReadError(table: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (isRetryableSupabaseAuthError(error)) {
+    return `No se pudo leer ${table} por un desajuste temporal de autenticación. La vista seguirá cargando y se reintentará en la siguiente actualización.`;
+  }
+
+  return `No se pudo leer ${table}: ${message}`;
+}
+
 async function fetchSupabaseTableWithRetry<T>(
   config: SupabaseConfig,
   table: string,
@@ -349,8 +364,7 @@ async function fetchSupabaseTableWithRetry<T>(
   try {
     return await fetchSupabaseTable<T>(config, table);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (retries > 0 && message.includes("PGRST303")) {
+    if (retries > 0 && isRetryableSupabaseAuthError(error)) {
       await sleep(2000);
       return fetchSupabaseTableWithRetry<T>(config, table, retries - 1);
     }
@@ -464,22 +478,24 @@ export async function getDashboardData(filters?: Partial<DashboardFilters>): Pro
   }
 
   const [executionsResult, testsResult] = await Promise.allSettled([
-    fetchSupabaseTable<ExecutionRow>(config, "executions"),
+    fetchSupabaseTableWithRetry<ExecutionRow>(config, "executions"),
     fetchSupabaseTableWithRetry<ExecutionTestRow>(config, "execution_tests"),
   ]);
 
   const tableErrors: string[] = [];
 
+  const rawExecutions =
+    executionsResult.status === "fulfilled"
+      ? executionsResult.value
+      : [];
+  const rawTests = testsResult.status === "fulfilled" ? testsResult.value : [];
+
   if (executionsResult.status === "rejected") {
-    throw executionsResult.reason;
+    tableErrors.push(formatTableReadError("executions", executionsResult.reason));
   }
 
-  const rawExecutions = executionsResult.value;
-  const rawTests = testsResult.status === "fulfilled" ? testsResult.value : [];
   if (testsResult.status === "rejected") {
-    tableErrors.push(
-      testsResult.reason instanceof Error ? testsResult.reason.message : String(testsResult.reason),
-    );
+    tableErrors.push(formatTableReadError("execution_tests", testsResult.reason));
   }
 
   const executions = rawExecutions
