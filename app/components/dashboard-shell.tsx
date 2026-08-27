@@ -96,6 +96,34 @@ type NavSection = {
   description: string;
 };
 
+type LaunchDispatchPayload = {
+  message?: string;
+  error?: string;
+  run_id?: number | null;
+  run_status?: string | null;
+  run_conclusion?: string | null;
+  run_url?: string | null;
+  artifact_id?: number | null;
+  artifact_name?: string | null;
+  artifact_expired?: boolean | null;
+} | null;
+
+type LaunchStatusPayload = {
+  status?: string;
+  conclusion?: string | null;
+  html_url?: string;
+  updated_at?: string;
+  artifact_id?: number | null;
+  artifact_name?: string | null;
+  artifact_expired?: boolean | null;
+};
+
+type LaunchDescriptor = {
+  title: string;
+  subtitle: string;
+  idPrefix: "case" | "suite";
+};
+
 const NAV_SECTIONS: NavSection[] = [
   { id: "overview", label: "Resumen", description: "KPIs y la última ejecución." },
   { id: "suites", label: "Suites", description: "Agrupación de casos y métricas." },
@@ -392,6 +420,93 @@ function launchStatusLabel(status: string, conclusion: string): string {
 function pushLaunchHistory(history: LaunchRecord[], next: LaunchRecord): LaunchRecord[] {
   const withoutCurrent = history.filter((row) => row.runId !== next.runId);
   return [next, ...withoutCurrent].slice(0, 8);
+}
+
+function resetLaunchPanelState(current: LaunchPanelState): LaunchPanelState {
+  return {
+    ...current,
+    launching: true,
+    error: "",
+    success: "",
+    runId: null,
+    status: "",
+    conclusion: "",
+    url: "",
+    updatedAt: "",
+    artifactId: null,
+    artifactName: "",
+    artifactExpired: false,
+  };
+}
+
+function buildLaunchHistoryRecord(
+  descriptor: LaunchDescriptor,
+  launch: {
+    runId: number | null;
+    status: string;
+    conclusion: string;
+    updatedAt: string;
+    url: string;
+    artifactId: number | null;
+    artifactName: string;
+    artifactExpired: boolean;
+  },
+): LaunchRecord {
+  return {
+    id: `${descriptor.idPrefix}-${launch.runId ?? "pending"}`,
+    title: descriptor.title,
+    subtitle: descriptor.subtitle,
+    runId: launch.runId,
+    status: launch.status,
+    conclusion: launch.conclusion,
+    updatedAt: launch.updatedAt,
+    url: launch.url,
+    artifactId: launch.artifactId,
+    artifactName: launch.artifactName,
+    artifactExpired: launch.artifactExpired,
+  };
+}
+
+function applyLaunchStatusUpdate(
+  current: LaunchPanelState,
+  payload: LaunchStatusPayload,
+  descriptor: LaunchDescriptor,
+): LaunchPanelState {
+  const next = {
+    ...current,
+    status: payload.status ?? "",
+    conclusion: payload.conclusion ?? "",
+    url: payload.html_url ?? "",
+    updatedAt: payload.updated_at ?? "",
+    artifactId: payload.artifact_id ?? null,
+    artifactName: payload.artifact_name ?? "",
+    artifactExpired: Boolean(payload.artifact_expired),
+  };
+
+  next.history = pushLaunchHistory(current.history, buildLaunchHistoryRecord(descriptor, next));
+  return next;
+}
+
+function applyLaunchDispatchUpdate(
+  current: LaunchPanelState,
+  payload: Exclude<LaunchDispatchPayload, null>,
+  descriptor: LaunchDescriptor,
+): LaunchPanelState {
+  const next = {
+    ...current,
+    launching: false,
+    runId: payload.run_id ?? null,
+    status: payload.run_status ?? "queued",
+    conclusion: payload.run_conclusion ?? "",
+    url: payload.run_url ?? "",
+    updatedAt: "",
+    artifactId: payload.artifact_id ?? null,
+    artifactName: payload.artifact_name ?? "",
+    artifactExpired: Boolean(payload.artifact_expired),
+  };
+
+  next.history = pushLaunchHistory(current.history, buildLaunchHistoryRecord(descriptor, next));
+  return next;
 }
 
 function normalizeText(value: string | null | undefined): string {
@@ -861,48 +976,23 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
           return;
         }
 
-        const payload = (await response.json()) as {
-          status?: string;
-          conclusion?: string | null;
-          html_url?: string;
-          updated_at?: string;
-          artifact_id?: number | null;
-          artifact_name?: string | null;
-          artifact_expired?: boolean | null;
-        };
+        const payload = (await response.json()) as LaunchStatusPayload;
 
         if (cancelled) {
           return;
         }
 
-        setCaseLaunch((current) => {
-          const next = {
-            ...current,
-            status: payload.status ?? "",
-            conclusion: payload.conclusion ?? "",
-            url: payload.html_url ?? "",
-            updatedAt: payload.updated_at ?? "",
-            artifactId: payload.artifact_id ?? null,
-            artifactName: payload.artifact_name ?? "",
-            artifactExpired: Boolean(payload.artifact_expired),
-          };
-
-          next.history = pushLaunchHistory(current.history, {
-            id: `case-${next.runId ?? "pending"}`,
-            title: launchSelectedCaseRow?.testName ?? "Sin caso",
-            subtitle: joinParts([launchSelectedCaseRow?.className, launchSelectedCaseRow?.groupName], "Sin clase o grupo"),
-            runId: next.runId,
-            status: next.status,
-            conclusion: next.conclusion,
-            updatedAt: next.updatedAt,
-            url: next.url,
-            artifactId: next.artifactId,
-            artifactName: next.artifactName,
-            artifactExpired: next.artifactExpired,
-          });
-
-          return next;
-        });
+        setCaseLaunch((current) =>
+          applyLaunchStatusUpdate(
+            current,
+            payload,
+            {
+              idPrefix: "case",
+              title: launchSelectedCaseRow?.testName ?? "Sin caso",
+              subtitle: joinParts([launchSelectedCaseRow?.className, launchSelectedCaseRow?.groupName], "Sin clase o grupo"),
+            },
+          ),
+        );
 
         if (payload.status === "completed") {
           setCaseLaunch((current) => ({
@@ -947,48 +1037,23 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
           return;
         }
 
-        const payload = (await response.json()) as {
-          status?: string;
-          conclusion?: string | null;
-          html_url?: string;
-          updated_at?: string;
-          artifact_id?: number | null;
-          artifact_name?: string | null;
-          artifact_expired?: boolean | null;
-        };
+        const payload = (await response.json()) as LaunchStatusPayload;
 
         if (cancelled) {
           return;
         }
 
-        setSuiteLaunch((current) => {
-          const next = {
-            ...current,
-            status: payload.status ?? "",
-            conclusion: payload.conclusion ?? "",
-            url: payload.html_url ?? "",
-            updatedAt: payload.updated_at ?? "",
-            artifactId: payload.artifact_id ?? null,
-            artifactName: payload.artifact_name ?? "",
-            artifactExpired: Boolean(payload.artifact_expired),
-          };
-
-          next.history = pushLaunchHistory(current.history, {
-            id: `suite-${next.runId ?? "pending"}`,
-            title: launchSelectedSuiteRow?.suiteName ?? "Sin suite",
-            subtitle: `${formatNumber(launchSelectedSuiteRow?.executions ?? 0)} ejecuciones, ${formatNumber(launchSelectedSuiteRow?.cases ?? 0)} casos`,
-            runId: next.runId,
-            status: next.status,
-            conclusion: next.conclusion,
-            updatedAt: next.updatedAt,
-            url: next.url,
-            artifactId: next.artifactId,
-            artifactName: next.artifactName,
-            artifactExpired: next.artifactExpired,
-          });
-
-          return next;
-        });
+        setSuiteLaunch((current) =>
+          applyLaunchStatusUpdate(
+            current,
+            payload,
+            {
+              idPrefix: "suite",
+              title: launchSelectedSuiteRow?.suiteName ?? "Sin suite",
+              subtitle: `${formatNumber(launchSelectedSuiteRow?.executions ?? 0)} ejecuciones, ${formatNumber(launchSelectedSuiteRow?.cases ?? 0)} casos`,
+            },
+          ),
+        );
 
         if (payload.status === "completed") {
           setSuiteLaunch((current) => ({
@@ -1027,20 +1092,7 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
       return;
     }
 
-    setCaseLaunch((current) => ({
-      ...current,
-      launching: true,
-      error: "",
-      success: "",
-      runId: null,
-      status: "",
-      conclusion: "",
-      url: "",
-      updatedAt: "",
-      artifactId: null,
-      artifactName: "",
-      artifactExpired: false,
-    }));
+    setCaseLaunch((current) => resetLaunchPanelState(current));
 
     try {
       const response = await fetch("/api/github/dispatch", {
@@ -1071,35 +1123,17 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
       }
 
       if (payload?.run_id) {
-        setCaseLaunch((current) => {
-          const next: LaunchPanelState = {
-            ...current,
-            launching: false,
-            runId: payload.run_id ?? null,
-            status: payload.run_status ?? "queued",
-            conclusion: payload.run_conclusion ?? "",
-            url: payload.run_url ?? "",
-            updatedAt: "",
-            artifactId: payload.artifact_id ?? null,
-            artifactName: payload.artifact_name ?? "",
-            artifactExpired: Boolean(payload.artifact_expired),
-            history: pushLaunchHistory(current.history, {
-              id: `case-${payload.run_id ?? Date.now()}`,
+        setCaseLaunch((current) =>
+          applyLaunchDispatchUpdate(
+            current,
+            payload,
+            {
+              idPrefix: "case",
               title: selectedTestName,
               subtitle: joinParts([launchSelectedCaseRow?.className, launchSelectedCaseRow?.groupName], "Sin clase o grupo"),
-              runId: payload.run_id ?? null,
-              status: payload.run_status ?? "queued",
-              conclusion: payload.run_conclusion ?? "",
-              updatedAt: "",
-              url: payload.run_url ?? "",
-              artifactId: payload.artifact_id ?? null,
-              artifactName: payload.artifact_name ?? "",
-              artifactExpired: Boolean(payload.artifact_expired),
-            }),
-          };
-
-          return next;
-        });
+            },
+          ),
+        );
       }
 
       setCaseLaunch((current) => ({
@@ -1124,20 +1158,7 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
       return;
     }
 
-    setSuiteLaunch((current) => ({
-      ...current,
-      launching: true,
-      error: "",
-      success: "",
-      runId: null,
-      status: "",
-      conclusion: "",
-      url: "",
-      updatedAt: "",
-      artifactId: null,
-      artifactName: "",
-      artifactExpired: false,
-    }));
+    setSuiteLaunch((current) => resetLaunchPanelState(current));
 
     try {
       const response = await fetch("/api/github/dispatch", {
@@ -1168,35 +1189,17 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
       }
 
       if (payload?.run_id) {
-        setSuiteLaunch((current) => {
-          const next: LaunchPanelState = {
-            ...current,
-            launching: false,
-            runId: payload.run_id ?? null,
-            status: payload.run_status ?? "queued",
-            conclusion: payload.run_conclusion ?? "",
-            url: payload.run_url ?? "",
-            updatedAt: "",
-            artifactId: payload.artifact_id ?? null,
-            artifactName: payload.artifact_name ?? "",
-            artifactExpired: Boolean(payload.artifact_expired),
-            history: pushLaunchHistory(current.history, {
-              id: `suite-${payload.run_id ?? Date.now()}`,
+        setSuiteLaunch((current) =>
+          applyLaunchDispatchUpdate(
+            current,
+            payload,
+            {
+              idPrefix: "suite",
               title: selectedSuiteName,
               subtitle: `${formatNumber(launchSelectedSuiteRow?.executions ?? 0)} ejecuciones, ${formatNumber(launchSelectedSuiteRow?.cases ?? 0)} casos`,
-              runId: payload.run_id ?? null,
-              status: payload.run_status ?? "queued",
-              conclusion: payload.run_conclusion ?? "",
-              updatedAt: "",
-              url: payload.run_url ?? "",
-              artifactId: payload.artifact_id ?? null,
-              artifactName: payload.artifact_name ?? "",
-              artifactExpired: Boolean(payload.artifact_expired),
-            }),
-          };
-
-          return next;
-        });
+            },
+          ),
+        );
       }
 
       setSuiteLaunch((current) => ({

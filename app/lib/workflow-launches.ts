@@ -40,20 +40,69 @@ function getSupabaseConfig(): SupabaseConfig | null {
   return { url, key };
 }
 
-async function fetchSupabaseJson<T>(path: string, init?: RequestInit): Promise<T | null> {
+function buildSupabaseHeaders(config: SupabaseConfig, extraHeaders?: HeadersInit): HeadersInit {
+  return {
+    apikey: config.key,
+    Authorization: `Bearer ${config.key}`,
+    Accept: "application/json",
+    ...(extraHeaders ?? {}),
+  };
+}
+
+async function readWorkflowLaunchRows<T>(path: string): Promise<T | null> {
   const config = getSupabaseConfig();
   if (!config) {
     return null;
   }
 
   const response = await fetch(new URL(path, config.url), {
-    ...init,
-    headers: {
-      apikey: config.key,
-      Authorization: `Bearer ${config.key}`,
-      Accept: "application/json",
-      ...(init?.headers ?? {}),
-    },
+    headers: buildSupabaseHeaders(config),
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return (await response.json()) as T;
+}
+
+async function writeWorkflowLaunchRows<T>(path: string, body: unknown): Promise<T | null> {
+  const config = getSupabaseConfig();
+  if (!config) {
+    return null;
+  }
+
+  const response = await fetch(new URL(path, config.url), {
+    method: "POST",
+    headers: buildSupabaseHeaders(config, {
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    }),
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return (await response.json()) as T;
+}
+
+async function patchWorkflowLaunchRows<T>(path: string, body: unknown): Promise<T | null> {
+  const config = getSupabaseConfig();
+  if (!config) {
+    return null;
+  }
+
+  const response = await fetch(new URL(path, config.url), {
+    method: "PATCH",
+    headers: buildSupabaseHeaders(config, {
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    }),
+    body: JSON.stringify(body),
     cache: "no-store",
   });
 
@@ -65,7 +114,7 @@ async function fetchSupabaseJson<T>(path: string, init?: RequestInit): Promise<T
 }
 
 export async function fetchWorkflowLaunches(limit = 24): Promise<WorkflowLaunchRow[]> {
-  const payload = await fetchSupabaseJson<WorkflowLaunchRow[]>(
+  const payload = await readWorkflowLaunchRows<WorkflowLaunchRow[]>(
     `/rest/v1/workflow_launches?select=*&order=created_at.desc&limit=${limit}`,
   );
 
@@ -86,40 +135,23 @@ type CreateWorkflowLaunchInput = {
 };
 
 export async function createWorkflowLaunch(input: CreateWorkflowLaunchInput): Promise<WorkflowLaunchRow | null> {
-  const config = getSupabaseConfig();
-  if (!config) {
-    return null;
-  }
-
-  const response = await fetch(new URL("/rest/v1/workflow_launches", config.url), {
-    method: "POST",
-    headers: {
-      apikey: config.key,
-      Authorization: `Bearer ${config.key}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify({
-      mode: input.mode,
-      identifier: input.identifier,
-      run_id: input.runId,
-      status: input.status ?? null,
-      conclusion: input.conclusion ?? null,
-      run_url: input.runUrl ?? null,
-      artifact_id: input.artifactId ?? null,
-      artifact_name: input.artifactName ?? null,
-      artifact_expired: input.artifactExpired ?? false,
-      updated_at: input.updatedAt ?? null,
-    }),
-    cache: "no-store",
+  const payload = await writeWorkflowLaunchRows<WorkflowLaunchRow[]>("/rest/v1/workflow_launches", {
+    mode: input.mode,
+    identifier: input.identifier,
+    run_id: input.runId,
+    status: input.status ?? null,
+    conclusion: input.conclusion ?? null,
+    run_url: input.runUrl ?? null,
+    artifact_id: input.artifactId ?? null,
+    artifact_name: input.artifactName ?? null,
+    artifact_expired: input.artifactExpired ?? false,
+    updated_at: input.updatedAt ?? null,
   });
 
-  if (!response.ok) {
+  if (!payload) {
     return null;
   }
 
-  const payload = (await response.json()) as WorkflowLaunchRow[];
   return payload[0] ?? null;
 }
 
@@ -135,40 +167,23 @@ type UpdateWorkflowLaunchInput = {
 };
 
 export async function updateWorkflowLaunchByRunId(input: UpdateWorkflowLaunchInput): Promise<WorkflowLaunchRow | null> {
-  const config = getSupabaseConfig();
-  if (!config) {
-    return null;
-  }
-
-  const response = await fetch(
-    new URL(`/rest/v1/workflow_launches?run_id=eq.${encodeURIComponent(String(input.runId))}`, config.url),
+  const payload = await patchWorkflowLaunchRows<WorkflowLaunchRow[]>(
+    `/rest/v1/workflow_launches?run_id=eq.${encodeURIComponent(String(input.runId))}`,
     {
-      method: "PATCH",
-      headers: {
-        apikey: config.key,
-        Authorization: `Bearer ${config.key}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        Prefer: "return=representation",
-      },
-      body: JSON.stringify({
-        status: input.status ?? null,
-        conclusion: input.conclusion ?? null,
-        run_url: input.runUrl ?? null,
-        artifact_id: input.artifactId ?? null,
-        artifact_name: input.artifactName ?? null,
-        artifact_expired: input.artifactExpired ?? null,
-        updated_at: input.updatedAt ?? null,
-      }),
-      cache: "no-store",
+      status: input.status ?? null,
+      conclusion: input.conclusion ?? null,
+      run_url: input.runUrl ?? null,
+      artifact_id: input.artifactId ?? null,
+      artifact_name: input.artifactName ?? null,
+      artifact_expired: input.artifactExpired ?? null,
+      updated_at: input.updatedAt ?? null,
     },
   );
 
-  if (!response.ok) {
+  if (!payload) {
     return null;
   }
 
-  const payload = (await response.json()) as WorkflowLaunchRow[];
   return payload[0] ?? null;
 }
 
@@ -177,40 +192,23 @@ type UpdateWorkflowLaunchByIdInput = UpdateWorkflowLaunchInput & {
 };
 
 export async function updateWorkflowLaunchById(input: UpdateWorkflowLaunchByIdInput): Promise<WorkflowLaunchRow | null> {
-  const config = getSupabaseConfig();
-  if (!config) {
-    return null;
-  }
-
-  const response = await fetch(
-    new URL(`/rest/v1/workflow_launches?id=eq.${encodeURIComponent(input.id)}`, config.url),
+  const payload = await patchWorkflowLaunchRows<WorkflowLaunchRow[]>(
+    `/rest/v1/workflow_launches?id=eq.${encodeURIComponent(input.id)}`,
     {
-      method: "PATCH",
-      headers: {
-        apikey: config.key,
-        Authorization: `Bearer ${config.key}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        Prefer: "return=representation",
-      },
-      body: JSON.stringify({
-        run_id: input.runId ?? null,
-        status: input.status ?? null,
-        conclusion: input.conclusion ?? null,
-        run_url: input.runUrl ?? null,
-        artifact_id: input.artifactId ?? null,
-        artifact_name: input.artifactName ?? null,
-        artifact_expired: input.artifactExpired ?? null,
-        updated_at: input.updatedAt ?? null,
-      }),
-      cache: "no-store",
+      run_id: input.runId ?? null,
+      status: input.status ?? null,
+      conclusion: input.conclusion ?? null,
+      run_url: input.runUrl ?? null,
+      artifact_id: input.artifactId ?? null,
+      artifact_name: input.artifactName ?? null,
+      artifact_expired: input.artifactExpired ?? null,
+      updated_at: input.updatedAt ?? null,
     },
   );
 
-  if (!response.ok) {
+  if (!payload) {
     return null;
   }
 
-  const payload = (await response.json()) as WorkflowLaunchRow[];
   return payload[0] ?? null;
 }
