@@ -41,6 +41,7 @@ Para lanzar ejecuciones desde la UI, agrega además:
 GITHUB_TOKEN=tu_github_pat
 GITHUB_REPOSITORY=jermaburgos/ProyectoBaseAutomatizacionSelenium
 GITHUB_WORKFLOW_FILE=run-single-test.yml
+GITHUB_GROUPS_WORKFLOW_FILE=run-groups.yml
 GITHUB_WORKFLOW_REF=feature/webYourStore
 GITHUB_API_VERSION=2026-03-10
 ```
@@ -84,7 +85,10 @@ Cada ejecución puede incluir:
 
 ## Lanzar ejecución
 
-La sección `Lanzar ejecución` muestra los casos únicos detectados en la base de datos y permite disparar el workflow de GitHub Actions enviando el `test_name` seleccionado.
+La sección `Lanzar ejecución` permite elegir entre dos modos:
+
+- `Prueba unitaria`: muestra los casos únicos detectados en la base de datos y envía el `test_name` seleccionado al workflow `run-single-test.yml`.
+- `Suite / grupo`: muestra las suites existentes y envía un `test_groups` separado por comas al workflow `run-groups.yml`.
 
 El backend expone `POST /api/github/dispatch` y usa las variables de entorno anteriores para llamar a la API de GitHub sin exponer el token en el navegador.
 

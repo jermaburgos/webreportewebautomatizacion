@@ -1,3 +1,6 @@
+import type { WorkflowLaunchRow } from "@/app/lib/workflow-launches";
+import { fetchWorkflowLaunches } from "@/app/lib/workflow-launches";
+
 export type ExecutionRow = {
   id: string;
   xml_test_name: string | null;
@@ -101,6 +104,7 @@ export type DashboardData = {
   latestExecution: DashboardExecution | null;
   recentFailures: DashboardTest[];
   suiteSummaries: SuiteSummary[];
+  workflowLaunches: WorkflowLaunchRow[];
 };
 
 const SUPABASE_URL =
@@ -474,12 +478,14 @@ export async function getDashboardData(filters?: Partial<DashboardFilters>): Pro
       latestExecution: null,
       recentFailures: [],
       suiteSummaries: [],
+      workflowLaunches: [],
     };
   }
 
-  const [executionsResult, testsResult] = await Promise.allSettled([
+  const [executionsResult, testsResult, launchesResult] = await Promise.allSettled([
     fetchSupabaseTableWithRetry<ExecutionRow>(config, "executions"),
     fetchSupabaseTableWithRetry<ExecutionTestRow>(config, "execution_tests"),
+    fetchWorkflowLaunches(32),
   ]);
 
   const tableErrors: string[] = [];
@@ -496,6 +502,10 @@ export async function getDashboardData(filters?: Partial<DashboardFilters>): Pro
 
   if (testsResult.status === "rejected") {
     tableErrors.push(formatTableReadError("execution_tests", testsResult.reason));
+  }
+
+  if (launchesResult.status === "rejected") {
+    tableErrors.push(formatTableReadError("workflow_launches", launchesResult.reason));
   }
 
   const executions = rawExecutions
@@ -548,6 +558,12 @@ export async function getDashboardData(filters?: Partial<DashboardFilters>): Pro
   const latestExecution = executions[0] ?? null;
   const recentFailures = tests.filter((row) => row.statusLabel !== "passed").slice(0, 8);
   const suiteSummaries = buildSuiteSummaries(executions, tests);
+  const workflowLaunches =
+    launchesResult.status === "fulfilled"
+      ? [...launchesResult.value].sort(
+          (left, right) => new Date(right.created_at || 0).getTime() - new Date(left.created_at || 0).getTime(),
+        )
+      : [];
 
   const browserOptions = [...new Set(rawExecutions.map((row) => toText(row.browser)).filter(Boolean))].sort(
     (left, right) => left.localeCompare(right),
@@ -581,6 +597,7 @@ export async function getDashboardData(filters?: Partial<DashboardFilters>): Pro
     latestExecution,
     recentFailures,
     suiteSummaries,
+    workflowLaunches,
     tableErrors,
   };
 }

@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { updateWorkflowLaunchByRunId } from "@/app/lib/workflow-launches";
 
 function getGitHubConfig() {
   const token = process.env.GITHUB_TOKEN?.trim() ?? "";
@@ -104,6 +105,16 @@ export async function GET(request: NextRequest) {
   };
 
   const artifact = selectArtifact(await fetchRunArtifacts(config, runId));
+  await updateWorkflowLaunchByRunId({
+    runId: Number(runId),
+    status: payload.status ?? null,
+    conclusion: payload.conclusion ?? null,
+    runUrl: payload.html_url ?? null,
+    artifactId: artifact?.id ?? null,
+    artifactName: artifact?.name ?? null,
+    artifactExpired: artifact?.expired ?? null,
+    updatedAt: payload.updated_at ?? null,
+  });
 
   return Response.json(
     {

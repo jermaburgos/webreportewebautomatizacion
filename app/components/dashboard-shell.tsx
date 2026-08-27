@@ -1,7 +1,9 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, useTransition, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import type { DashboardData, DashboardExecution, DashboardTest, SuiteSummary } from "@/app/lib/dashboard";
+import type { WorkflowLaunchRow } from "@/app/lib/workflow-launches";
 import {
   formatDurationHuman,
   formatExecutionTime,
@@ -15,6 +17,33 @@ type SortDirection = "asc" | "desc";
 type SortState<K extends string> = { key: K; direction: SortDirection };
 type PageSize = 10 | 20 | 50 | 100;
 type PaginationState = { page: number; pageSize: PageSize };
+type LaunchRecord = {
+  id: string;
+  title: string;
+  subtitle: string;
+  runId: number | null;
+  status: string;
+  conclusion: string;
+  updatedAt: string;
+  url: string;
+  artifactId: number | null;
+  artifactName: string;
+  artifactExpired: boolean;
+};
+type LaunchPanelState = {
+  launching: boolean;
+  success: string;
+  error: string;
+  runId: number | null;
+  status: string;
+  conclusion: string;
+  url: string;
+  updatedAt: string;
+  artifactId: number | null;
+  artifactName: string;
+  artifactExpired: boolean;
+  history: LaunchRecord[];
+};
 
 type CaseRow = {
   caseKey: string;
@@ -61,6 +90,21 @@ type SuiteSortKey = "suite" | "executions" | "cases" | "averageDuration" | "late
 type CaseSortKey = "case" | "suite" | "executions" | "passed" | "failed" | "skipped" | "latestTimestamp";
 type CaseExecutionSortKey = "timestamp" | "suite" | "group" | "browser" | "status" | "duration";
 type HistorySortKey = "timestamp" | "title" | "suite" | "status" | "duration";
+type NavSection = {
+  id: SectionId;
+  label: string;
+  description: string;
+};
+
+const NAV_SECTIONS: NavSection[] = [
+  { id: "overview", label: "Resumen", description: "KPIs y la última ejecución." },
+  { id: "suites", label: "Suites", description: "Agrupación de casos y métricas." },
+  { id: "cases", label: "Casos", description: "Casos únicos y sus ejecuciones." },
+  { id: "launch", label: "Lanzar", description: "Dispara pruebas unitarias o suites." },
+  { id: "history", label: "Historial", description: "Búsqueda y seguimiento histórico." },
+  { id: "executions", label: "Ejecuciones", description: "Listado general de corridas." },
+  { id: "failures", label: "Fallos", description: "Errores recientes y sus detalles." },
+];
 
 function statusTone(status: string): string {
   if (status === "passed") return "bg-emerald-500/15 text-emerald-300 ring-emerald-400/30";
@@ -83,7 +127,7 @@ function SectionButton({
       type="button"
       onClick={onClick}
       className={[
-        "w-full whitespace-nowrap rounded-full px-3 py-2 text-xs font-medium transition sm:w-auto sm:px-4 sm:text-sm",
+        "inline-flex w-full flex-col items-start gap-0.5 rounded-full px-3 py-2 text-left text-xs font-medium transition sm:w-auto sm:px-4 sm:text-sm",
         active ? "bg-white text-slate-950 shadow-lg shadow-black/20" : "text-slate-300 hover:bg-white/8 hover:text-white",
       ].join(" ")}
     >
@@ -207,8 +251,8 @@ function toggleSort<K extends string>(state: SortState<K>, nextKey: K): SortStat
 }
 
 function sortMarker(active: boolean, direction: SortDirection): string {
-  if (!active) return "â†•";
-  return direction === "asc" ? "â†‘" : "â†“";
+  if (!active) return "↕";
+  return direction === "asc" ? "↑" : "↓";
 }
 
 function sortableHeader({
@@ -223,8 +267,12 @@ function sortableHeader({
   onClick: () => void;
 }) {
   return (
-    <button type="button" onClick={onClick} className="inline-flex items-center gap-2 text-left transition hover:text-white">
-      <span>{label}</span>
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex max-w-full min-w-0 items-center gap-2 text-left transition hover:text-white"
+    >
+      <span className="break-words whitespace-normal">{label}</span>
       <span className="text-[0.65rem] text-slate-400">{sortMarker(active, direction)}</span>
     </button>
   );
@@ -277,11 +325,73 @@ function reportActionContent(label: string) {
 
 function reportButtonClassName(kind: "preview" | "download"): string {
   return [
-    "inline-flex items-center justify-center gap-2 rounded-full px-3 py-2 text-sm font-medium transition",
+    "inline-flex max-w-full items-center justify-center gap-2 rounded-full px-3 py-2 text-sm font-medium leading-tight transition",
     kind === "preview"
       ? "border border-cyan-400/30 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-400/20"
       : "border border-white/10 bg-white/5 text-slate-100 hover:bg-white/10",
   ].join(" ");
+}
+
+function buildLaunchPanelState(mode: "case" | "suite", launches: WorkflowLaunchRow[]): LaunchPanelState {
+  const rows = launches
+    .filter((launch) => launch.mode === mode)
+    .sort((left, right) => new Date(right.created_at || 0).getTime() - new Date(left.created_at || 0).getTime());
+
+  const history = rows.map((launch) => ({
+    id: launch.id,
+    title: launch.identifier,
+    subtitle: launch.mode === "case" ? "Prueba unitaria" : "Suite / grupo",
+    runId: launch.run_id,
+    status: launch.status ?? "",
+    conclusion: launch.conclusion ?? "",
+    updatedAt: launch.updated_at ?? "",
+    url: launch.run_url ?? "",
+    artifactId: launch.artifact_id ?? null,
+    artifactName: launch.artifact_name ?? "",
+    artifactExpired: Boolean(launch.artifact_expired),
+  }));
+
+  const latest = history[0] ?? null;
+
+  return {
+    launching: false,
+    success: "",
+    error: "",
+    runId: latest?.runId ?? null,
+    status: latest?.status ?? "",
+    conclusion: latest?.conclusion ?? "",
+    url: latest?.url ?? "",
+    updatedAt: latest?.updatedAt ?? "",
+    artifactId: latest?.artifactId ?? null,
+    artifactName: latest?.artifactName ?? "",
+    artifactExpired: latest?.artifactExpired ?? false,
+    history,
+  };
+}
+
+function launchStatusLabel(status: string, conclusion: string): string {
+  if (status === "queued") {
+    return "En cola";
+  }
+
+  if (status === "in_progress") {
+    return "En ejecución";
+  }
+
+  if (status === "completed") {
+    if (conclusion === "success") {
+      return "Completada";
+    }
+
+    return conclusion ? `Finalizada: ${conclusion}` : "Completada";
+  }
+
+  return status || "Sin lanzamiento";
+}
+
+function pushLaunchHistory(history: LaunchRecord[], next: LaunchRecord): LaunchRecord[] {
+  const withoutCurrent = history.filter((row) => row.runId !== next.runId);
+  return [next, ...withoutCurrent].slice(0, 8);
 }
 
 function normalizeText(value: string | null | undefined): string {
@@ -289,7 +399,7 @@ function normalizeText(value: string | null | undefined): string {
 }
 
 function joinParts(parts: Array<string | null | undefined>, fallback: string): string {
-  const text = parts.map((part) => normalizeText(part)).filter(Boolean).join(" â€¢ ");
+  const text = parts.map((part) => normalizeText(part)).filter(Boolean).join(" • ");
   return text || fallback;
 }
 
@@ -559,6 +669,66 @@ function renderStatusBadge(status: string) {
   );
 }
 
+function LaunchHistoryTable({
+  title,
+  rows,
+  emptyText,
+}: {
+  title: string;
+  rows: LaunchRecord[];
+  emptyText: string;
+}) {
+  return (
+    <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-xs uppercase tracking-[0.22em] text-slate-400">{title}</p>
+          <p className="mt-1 text-xs text-slate-500">{rows.length ? `${rows.length} ejecuciones recientes` : emptyText}</p>
+        </div>
+      </div>
+
+      {rows.length ? (
+        <div className="mt-3 overflow-x-auto">
+          <table className="min-w-[640px] w-full border-separate border-spacing-0 text-sm">
+            <thead>
+              <tr className="text-left text-slate-400">
+                <th className="border-b border-white/10 px-3 py-3">Nombre</th>
+                <th className="border-b border-white/10 px-3 py-3">Estado</th>
+                <th className="border-b border-white/10 px-3 py-3">Actualizado</th>
+                <th className="border-b border-white/10 px-3 py-3">Informe</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id} className="border-b border-white/5">
+                  <td className="px-3 py-3 align-top text-white">
+                    <p className="break-words font-medium">{row.title}</p>
+                    <p className="mt-1 break-words text-xs text-slate-400">{row.subtitle}</p>
+                  </td>
+                  <td className="px-3 py-3 align-top">{renderStatusBadge(launchStatusLabel(row.status, row.conclusion))}</td>
+                  <td className="px-3 py-3 align-top text-slate-300">{formatExecutionTime(row.updatedAt || null)}</td>
+                  <td className="px-3 py-3 align-top">
+                    <div className="flex flex-wrap gap-2">
+                      {row.artifactId && !row.artifactExpired ? (
+                        <a
+                          href={githubArtifactDownloadHref(row.artifactId, row.artifactName || "workflow-artifact")}
+                          className={reportButtonClassName("download")}
+                        >
+                          {reportActionContent("Descarga")}
+                        </a>
+                      ) : null}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function filterHistory(rows: HistoryRow[], query: string): HistoryRow[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return rows;
@@ -579,22 +749,16 @@ function filterHistory(rows: HistoryRow[], query: string): HistoryRow[] {
 }
 
 export default function DashboardShell({ data }: { data: DashboardData }) {
+  const router = useRouter();
   const [activeSection, setActiveSection] = useState<SectionId>("overview");
+  const [, startTransition] = useTransition();
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [selectedSuiteName, setSelectedSuiteName] = useState<string>("");
   const [selectedCaseKey, setSelectedCaseKey] = useState<string>("");
   const [launchSelectedCaseKey, setLaunchSelectedCaseKey] = useState<string>("");
-  const [launchingTest, setLaunchingTest] = useState(false);
-  const [launchSuccess, setLaunchSuccess] = useState<string>("");
-  const [launchError, setLaunchError] = useState<string>("");
-  const [launchWorkflowRunId, setLaunchWorkflowRunId] = useState<number | null>(null);
-  const [launchWorkflowStatus, setLaunchWorkflowStatus] = useState<string>("");
-  const [launchWorkflowConclusion, setLaunchWorkflowConclusion] = useState<string>("");
-  const [launchWorkflowUrl, setLaunchWorkflowUrl] = useState<string>("");
-  const [launchWorkflowUpdatedAt, setLaunchWorkflowUpdatedAt] = useState<string>("");
-  const [launchWorkflowArtifactId, setLaunchWorkflowArtifactId] = useState<number | null>(null);
-  const [launchWorkflowArtifactName, setLaunchWorkflowArtifactName] = useState<string>("");
-  const [launchWorkflowArtifactExpired, setLaunchWorkflowArtifactExpired] = useState<boolean>(false);
+  const [launchSelectedSuiteName, setLaunchSelectedSuiteName] = useState<string>("");
+  const [caseLaunch, setCaseLaunch] = useState<LaunchPanelState>(() => buildLaunchPanelState("case", data.workflowLaunches));
+  const [suiteLaunch, setSuiteLaunch] = useState<LaunchPanelState>(() => buildLaunchPanelState("suite", data.workflowLaunches));
   const [suiteSort, setSuiteSort] = useState<SortState<SuiteSortKey>>({ key: "latestTimestamp", direction: "desc" });
   const [caseSort, setCaseSort] = useState<SortState<CaseSortKey>>({ key: "latestTimestamp", direction: "desc" });
   const [caseExecutionSort, setCaseExecutionSort] = useState<SortState<CaseExecutionSortKey>>({ key: "timestamp", direction: "desc" });
@@ -632,20 +796,11 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
       ? launchSelectedCaseKey
       : caseRows[0]?.caseKey ?? "";
   const launchSelectedCaseRow = caseRows.find((row) => row.caseKey === launchSelectedCaseKeyEffective) ?? caseRows[0] ?? null;
-  const launchStatusLabel =
-    launchWorkflowStatus === "queued"
-      ? "En cola"
-      : launchWorkflowStatus === "in_progress"
-        ? "En ejecución"
-        : launchWorkflowStatus === "completed"
-          ? launchWorkflowConclusion === "success"
-            ? "Completada"
-            : launchWorkflowConclusion
-              ? `Finalizada: ${launchWorkflowConclusion}`
-              : "Completada"
-          : launchWorkflowStatus
-            ? launchWorkflowStatus
-            : "Sin lanzamiento";
+  const launchSelectedSuiteNameEffective =
+    launchSelectedSuiteName && suiteRows.some((row) => row.suiteName === launchSelectedSuiteName)
+      ? launchSelectedSuiteName
+      : suiteRows[0]?.suiteName ?? "";
+  const launchSelectedSuiteRow = suiteRows.find((row) => row.suiteName === launchSelectedSuiteNameEffective) ?? suiteRows[0] ?? null;
 
   const historyRows = useMemo(() => buildHistoryRows(data), [data]);
   const filteredExecutionHistoryRows = useMemo(
@@ -690,7 +845,7 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
   );
 
   useEffect(() => {
-    if (!launchWorkflowRunId || launchWorkflowStatus === "completed") {
+    if (!caseLaunch.runId || caseLaunch.status === "completed") {
       return undefined;
     }
 
@@ -698,7 +853,7 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
 
     const pollRunStatus = async () => {
       try {
-        const response = await fetch(`/api/github/run-status?run_id=${launchWorkflowRunId}`, {
+        const response = await fetch(`/api/github/run-status?run_id=${caseLaunch.runId}`, {
           cache: "no-store",
         });
 
@@ -720,21 +875,44 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
           return;
         }
 
-        setLaunchWorkflowStatus(payload.status ?? "");
-        setLaunchWorkflowConclusion(payload.conclusion ?? "");
-        setLaunchWorkflowUrl(payload.html_url ?? "");
-        setLaunchWorkflowUpdatedAt(payload.updated_at ?? "");
-        setLaunchWorkflowArtifactId(payload.artifact_id ?? null);
-        setLaunchWorkflowArtifactName(payload.artifact_name ?? "");
-        setLaunchWorkflowArtifactExpired(Boolean(payload.artifact_expired));
+        setCaseLaunch((current) => {
+          const next = {
+            ...current,
+            status: payload.status ?? "",
+            conclusion: payload.conclusion ?? "",
+            url: payload.html_url ?? "",
+            updatedAt: payload.updated_at ?? "",
+            artifactId: payload.artifact_id ?? null,
+            artifactName: payload.artifact_name ?? "",
+            artifactExpired: Boolean(payload.artifact_expired),
+          };
+
+          next.history = pushLaunchHistory(current.history, {
+            id: `case-${next.runId ?? "pending"}`,
+            title: launchSelectedCaseRow?.testName ?? "Sin caso",
+            subtitle: joinParts([launchSelectedCaseRow?.className, launchSelectedCaseRow?.groupName], "Sin clase o grupo"),
+            runId: next.runId,
+            status: next.status,
+            conclusion: next.conclusion,
+            updatedAt: next.updatedAt,
+            url: next.url,
+            artifactId: next.artifactId,
+            artifactName: next.artifactName,
+            artifactExpired: next.artifactExpired,
+          });
+
+          return next;
+        });
 
         if (payload.status === "completed") {
-          setLaunchingTest(false);
-          setLaunchSuccess(
-            payload.conclusion === "success"
-              ? "Workflow completado con éxito."
-              : `Workflow finalizado con estado ${payload.conclusion ?? "unknown"}.`,
-          );
+          setCaseLaunch((current) => ({
+            ...current,
+            launching: false,
+            success:
+              payload.conclusion === "success"
+                ? "Workflow completado con éxito."
+                : `Workflow finalizado con estado ${payload.conclusion ?? "unknown"}.`,
+          }));
         }
       } catch {
         // Mantener el último estado conocido y reintentar en el siguiente ciclo.
@@ -750,24 +928,119 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [launchWorkflowRunId, launchWorkflowStatus]);
+  }, [caseLaunch.runId, caseLaunch.status, launchSelectedCaseRow]);
+
+  useEffect(() => {
+    if (!suiteLaunch.runId || suiteLaunch.status === "completed") {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const pollRunStatus = async () => {
+      try {
+        const response = await fetch(`/api/github/run-status?run_id=${suiteLaunch.runId}`, {
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as {
+          status?: string;
+          conclusion?: string | null;
+          html_url?: string;
+          updated_at?: string;
+          artifact_id?: number | null;
+          artifact_name?: string | null;
+          artifact_expired?: boolean | null;
+        };
+
+        if (cancelled) {
+          return;
+        }
+
+        setSuiteLaunch((current) => {
+          const next = {
+            ...current,
+            status: payload.status ?? "",
+            conclusion: payload.conclusion ?? "",
+            url: payload.html_url ?? "",
+            updatedAt: payload.updated_at ?? "",
+            artifactId: payload.artifact_id ?? null,
+            artifactName: payload.artifact_name ?? "",
+            artifactExpired: Boolean(payload.artifact_expired),
+          };
+
+          next.history = pushLaunchHistory(current.history, {
+            id: `suite-${next.runId ?? "pending"}`,
+            title: launchSelectedSuiteRow?.suiteName ?? "Sin suite",
+            subtitle: `${formatNumber(launchSelectedSuiteRow?.executions ?? 0)} ejecuciones, ${formatNumber(launchSelectedSuiteRow?.cases ?? 0)} casos`,
+            runId: next.runId,
+            status: next.status,
+            conclusion: next.conclusion,
+            updatedAt: next.updatedAt,
+            url: next.url,
+            artifactId: next.artifactId,
+            artifactName: next.artifactName,
+            artifactExpired: next.artifactExpired,
+          });
+
+          return next;
+        });
+
+        if (payload.status === "completed") {
+          setSuiteLaunch((current) => ({
+            ...current,
+            launching: false,
+            success:
+              payload.conclusion === "success"
+                ? "Workflow completado con éxito."
+                : `Workflow finalizado con estado ${payload.conclusion ?? "unknown"}.`,
+          }));
+        }
+      } catch {
+        // Mantener el último estado conocido y reintentar en el siguiente ciclo.
+      }
+    };
+
+    void pollRunStatus();
+    const interval = window.setInterval(() => {
+      void pollRunStatus();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [suiteLaunch.runId, suiteLaunch.status, launchSelectedSuiteRow]);
+
+  function selectLaunchSuite(suiteName: string) {
+    setLaunchSelectedSuiteName(suiteName);
+  }
 
   async function launchSelectedCase() {
-    if (!launchSelectedCaseRow) {
+    const selectedTestName = launchSelectedCaseRow?.testName ?? "";
+
+    if (!selectedTestName) {
       return;
     }
 
-    setLaunchingTest(true);
-    setLaunchError("");
-    setLaunchSuccess("");
-    setLaunchWorkflowRunId(null);
-    setLaunchWorkflowStatus("");
-    setLaunchWorkflowConclusion("");
-    setLaunchWorkflowUrl("");
-    setLaunchWorkflowUpdatedAt("");
-    setLaunchWorkflowArtifactId(null);
-    setLaunchWorkflowArtifactName("");
-    setLaunchWorkflowArtifactExpired(false);
+    setCaseLaunch((current) => ({
+      ...current,
+      launching: true,
+      error: "",
+      success: "",
+      runId: null,
+      status: "",
+      conclusion: "",
+      url: "",
+      updatedAt: "",
+      artifactId: null,
+      artifactName: "",
+      artifactExpired: false,
+    }));
 
     try {
       const response = await fetch("/api/github/dispatch", {
@@ -775,7 +1048,10 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
         headers: {
           "content-type": "application/json",
         },
-        body: JSON.stringify({ test_name: launchSelectedCaseRow.testName }),
+        body: JSON.stringify({
+          mode: "case" as const,
+          test_name: selectedTestName,
+        }),
       });
 
       const payload = (await response.json().catch(() => null)) as {
@@ -795,20 +1071,146 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
       }
 
       if (payload?.run_id) {
-        setLaunchWorkflowRunId(payload.run_id);
-        setLaunchWorkflowStatus(payload.run_status ?? "queued");
-        setLaunchWorkflowConclusion(payload.run_conclusion ?? "");
-        setLaunchWorkflowUrl(payload.run_url ?? "");
-        setLaunchWorkflowArtifactId(payload.artifact_id ?? null);
-        setLaunchWorkflowArtifactName(payload.artifact_name ?? "");
-        setLaunchWorkflowArtifactExpired(Boolean(payload.artifact_expired));
+        setCaseLaunch((current) => {
+          const next: LaunchPanelState = {
+            ...current,
+            launching: false,
+            runId: payload.run_id ?? null,
+            status: payload.run_status ?? "queued",
+            conclusion: payload.run_conclusion ?? "",
+            url: payload.run_url ?? "",
+            updatedAt: "",
+            artifactId: payload.artifact_id ?? null,
+            artifactName: payload.artifact_name ?? "",
+            artifactExpired: Boolean(payload.artifact_expired),
+            history: pushLaunchHistory(current.history, {
+              id: `case-${payload.run_id ?? Date.now()}`,
+              title: selectedTestName,
+              subtitle: joinParts([launchSelectedCaseRow?.className, launchSelectedCaseRow?.groupName], "Sin clase o grupo"),
+              runId: payload.run_id ?? null,
+              status: payload.run_status ?? "queued",
+              conclusion: payload.run_conclusion ?? "",
+              updatedAt: "",
+              url: payload.run_url ?? "",
+              artifactId: payload.artifact_id ?? null,
+              artifactName: payload.artifact_name ?? "",
+              artifactExpired: Boolean(payload.artifact_expired),
+            }),
+          };
+
+          return next;
+        });
       }
 
-      setLaunchSuccess(payload?.message ?? `Ejecución lanzada para ${launchSelectedCaseRow.testName}.`);
+      setCaseLaunch((current) => ({
+        ...current,
+        success: payload?.message ?? `Ejecución lanzada para ${selectedTestName}.`,
+      }));
     } catch (error) {
-      setLaunchError(error instanceof Error ? error.message : "No se pudo lanzar la ejecución.");
+      setCaseLaunch((current) => ({
+        ...current,
+        launching: false,
+        error: error instanceof Error ? error.message : "No se pudo lanzar la ejecución.",
+      }));
     } finally {
-      setLaunchingTest(false);
+      setCaseLaunch((current) => ({ ...current, launching: false }));
+    }
+  }
+
+  async function launchSelectedSuite() {
+    const selectedSuiteName = launchSelectedSuiteRow?.suiteName ?? "";
+
+    if (!selectedSuiteName) {
+      return;
+    }
+
+    setSuiteLaunch((current) => ({
+      ...current,
+      launching: true,
+      error: "",
+      success: "",
+      runId: null,
+      status: "",
+      conclusion: "",
+      url: "",
+      updatedAt: "",
+      artifactId: null,
+      artifactName: "",
+      artifactExpired: false,
+    }));
+
+    try {
+      const response = await fetch("/api/github/dispatch", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          mode: "suite" as const,
+          test_groups: selectedSuiteName,
+        }),
+      });
+
+      const payload = (await response.json().catch(() => null)) as {
+        message?: string;
+        error?: string;
+        run_id?: number | null;
+        run_status?: string | null;
+        run_conclusion?: string | null;
+        run_url?: string | null;
+        artifact_id?: number | null;
+        artifact_name?: string | null;
+        artifact_expired?: boolean | null;
+      } | null;
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? payload?.message ?? "No se pudo lanzar la ejecución.");
+      }
+
+      if (payload?.run_id) {
+        setSuiteLaunch((current) => {
+          const next: LaunchPanelState = {
+            ...current,
+            launching: false,
+            runId: payload.run_id ?? null,
+            status: payload.run_status ?? "queued",
+            conclusion: payload.run_conclusion ?? "",
+            url: payload.run_url ?? "",
+            updatedAt: "",
+            artifactId: payload.artifact_id ?? null,
+            artifactName: payload.artifact_name ?? "",
+            artifactExpired: Boolean(payload.artifact_expired),
+            history: pushLaunchHistory(current.history, {
+              id: `suite-${payload.run_id ?? Date.now()}`,
+              title: selectedSuiteName,
+              subtitle: `${formatNumber(launchSelectedSuiteRow?.executions ?? 0)} ejecuciones, ${formatNumber(launchSelectedSuiteRow?.cases ?? 0)} casos`,
+              runId: payload.run_id ?? null,
+              status: payload.run_status ?? "queued",
+              conclusion: payload.run_conclusion ?? "",
+              updatedAt: "",
+              url: payload.run_url ?? "",
+              artifactId: payload.artifact_id ?? null,
+              artifactName: payload.artifact_name ?? "",
+              artifactExpired: Boolean(payload.artifact_expired),
+            }),
+          };
+
+          return next;
+        });
+      }
+
+      setSuiteLaunch((current) => ({
+        ...current,
+        success: payload?.message ?? `Ejecución por suite lanzada para ${selectedSuiteName}.`,
+      }));
+    } catch (error) {
+      setSuiteLaunch((current) => ({
+        ...current,
+        launching: false,
+        error: error instanceof Error ? error.message : "No se pudo lanzar la ejecución.",
+      }));
+    } finally {
+      setSuiteLaunch((current) => ({ ...current, launching: false }));
     }
   }
 
@@ -824,6 +1226,13 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
     return names;
   }, [selectedSuite]);
 
+  function handleSectionChange(section: SectionId) {
+    setActiveSection(section);
+    startTransition(() => {
+      router.refresh();
+    });
+  }
+
   return (
     <main className="min-h-screen overflow-x-hidden bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.18),_transparent_32%),linear-gradient(180deg,#020617_0%,#050816_45%,#0f172a_100%)] text-slate-100">
       <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-5 px-4 py-4 sm:px-6 sm:py-6 lg:px-8">
@@ -838,26 +1247,14 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
             </div>
 
             <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
-                {(["overview", "suites", "cases", "launch", "history", "executions", "failures"] as SectionId[]).map((section) => (
+                {NAV_SECTIONS.map((section) => (
                   <SectionButton
-                    key={section}
-                    active={activeSection === section}
-                    onClick={() => setActiveSection(section)}
+                    key={section.id}
+                    active={activeSection === section.id}
+                    onClick={() => handleSectionChange(section.id)}
                   >
-                  {section === "overview"
-                    ? "Resumen"
-                    : section === "suites"
-                      ? "Suites"
-                      : section === "cases"
-                        ? "Casos"
-                      : section === "launch"
-                        ? "Lanzar"
-                        : section === "history"
-                          ? "Historial"
-                          : section === "executions"
-                            ? "Ejecuciones"
-                            : "Fallos"}
-                </SectionButton>
+                    <span className="text-sm font-semibold leading-tight">{section.label}</span>
+                  </SectionButton>
               ))}
             </div>
           </div>
@@ -903,6 +1300,21 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
             <p className="mt-2 text-sm text-slate-300">Tiempo medio por ejecución.</p>
           </div>
         </section>
+
+        {(() => {
+          const currentSection = NAV_SECTIONS.find((section) => section.id === activeSection);
+
+          if (!currentSection) {
+            return null;
+          }
+
+          return (
+            <section className="rounded-[1.5rem] border border-white/10 bg-slate-950/50 px-5 py-4 sm:px-6">
+              <p className="text-xs uppercase tracking-[0.26em] text-cyan-300/80">{currentSection.label}</p>
+              <p className="mt-2 text-sm text-slate-300">{currentSection.description}</p>
+            </section>
+          );
+        })()}
 
         {activeSection === "overview" ? (
           <section className="grid gap-4 xl:grid-cols-[1.3fr_0.7fr]">
@@ -1001,11 +1413,11 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                     <div className="mt-3 grid grid-cols-1 gap-3 text-xs text-slate-300 sm:grid-cols-2">
                       <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                         <p className="text-slate-500">Promedio</p>
-                        <p className="mt-1 text-white">{formatDurationLabel(suite.averageDuration)}</p>
+                        <p className="mt-1 break-words text-white">{formatDurationLabel(suite.averageDuration)}</p>
                       </div>
                       <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                         <p className="text-slate-500">Última</p>
-                        <p className="mt-1 text-white">{formatExecutionTime(suite.latestTimestamp || null)}</p>
+                        <p className="mt-1 break-words text-white">{formatExecutionTime(suite.latestTimestamp || null)}</p>
                       </div>
                     </div>
                   </button>
@@ -1033,7 +1445,7 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                         ].join(" ")}
                         onClick={() => setSelectedSuiteName(suite.suiteName)}
                       >
-                        <td className="px-3 py-4 align-top text-white">{suite.suiteName}</td>
+                        <td className="px-3 py-4 align-top break-words text-white">{suite.suiteName}</td>
                         <td className="px-3 py-4 align-top text-slate-300">{formatNumber(suite.executions)}</td>
                         <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{formatNumber(suite.cases)}</td>
                         <td className="hidden md:table-cell px-3 py-4 align-top text-slate-300">{formatDurationLabel(suite.averageDuration)}</td>
@@ -1055,7 +1467,7 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
 
             <div className="rounded-[1.5rem] border border-white/10 bg-slate-950/55 p-4 sm:p-6">
               <h3 className="text-lg font-semibold text-white">Casos relacionados</h3>
-              <p className="mt-1 text-sm text-slate-400">{selectedSuite ? selectedSuite.suiteName : "Selecciona una suite"}</p>
+              <p className="mt-1 break-words text-sm text-slate-400">{selectedSuite ? selectedSuite.suiteName : "Selecciona una suite"}</p>
 
               <div className="mt-4 flex flex-wrap gap-2">
                 {suiteCaseList.length ? (
@@ -1091,14 +1503,14 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="font-medium text-white">{row.testName}</p>
-                        <p className="mt-1 text-xs text-slate-400">{joinParts([row.className, row.groupName], "Sin clase o grupo")}</p>
+                        <p className="break-words font-medium text-white">{row.testName}</p>
+                        <p className="mt-1 break-words text-xs text-slate-400">{joinParts([row.className, row.groupName], "Sin clase o grupo")}</p>
                       </div>
                       <div className="flex flex-col items-end gap-2">
                         <span className="rounded-full bg-white/5 px-3 py-1 text-xs text-slate-200">{formatNumber(row.executions)} ejec.</span>
                         {launchSelectedCaseKeyEffective === row.caseKey ? (
                           <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-3 py-1 text-[0.7rem] uppercase tracking-[0.18em] text-cyan-100">
-                            {launchStatusLabel}
+                            {launchStatusLabel(caseLaunch.status, caseLaunch.conclusion)}
                           </span>
                         ) : null}
                       </div>
@@ -1106,15 +1518,15 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                     <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-3">
                       <div className="rounded-xl bg-slate-950/60 px-3 py-2 text-slate-300">
                         <p className="text-slate-500">OK</p>
-                        <p className="mt-1 text-white">{formatNumber(row.passed)}</p>
+                        <p className="mt-1 break-words text-white">{formatNumber(row.passed)}</p>
                       </div>
                       <div className="rounded-xl bg-slate-950/60 px-3 py-2 text-slate-300">
                         <p className="text-slate-500">Errores</p>
-                        <p className="mt-1 text-white">{formatNumber(row.failed)}</p>
+                        <p className="mt-1 break-words text-white">{formatNumber(row.failed)}</p>
                       </div>
                       <div className="rounded-xl bg-slate-950/60 px-3 py-2 text-slate-300">
                         <p className="text-slate-500">Saltos</p>
-                        <p className="mt-1 text-white">{formatNumber(row.skipped)}</p>
+                        <p className="mt-1 break-words text-white">{formatNumber(row.skipped)}</p>
                       </div>
                     </div>
                   </button>
@@ -1143,8 +1555,8 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                         onClick={() => setSelectedCaseKey(row.caseKey)}
                       >
                         <td className="px-3 py-4 align-top text-white">
-                          <p className="font-medium">{row.testName}</p>
-                          <p className="mt-1 text-xs text-slate-400">{joinParts([row.className, row.groupName], "Sin clase o grupo")}</p>
+                          <p className="break-words font-medium">{row.testName}</p>
+                          <p className="mt-1 break-words text-xs text-slate-400">{joinParts([row.className, row.groupName], "Sin clase o grupo")}</p>
                         </td>
                         <td className="px-3 py-4 align-top text-slate-300">{formatNumber(row.executions)}</td>
                         <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{formatNumber(row.passed)}</td>
@@ -1269,178 +1681,320 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
         ) : null}
 
         {activeSection === "launch" ? (
-          <section className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+          <section className="grid gap-4 xl:grid-cols-2">
             <div className="min-w-0 rounded-[1.5rem] border border-white/10 bg-slate-950/55 p-4 sm:p-6">
-              <div className="flex flex-col gap-2">
-                <h2 className="text-xl font-semibold text-white">Lanzar ejecución</h2>
-                <p className="text-sm text-slate-400">Selecciona un caso único y dispara el workflow con ese `test_name`.</p>
-              </div>
-
-              <div className="mt-5 space-y-3 sm:hidden">
-                {pagedLaunchRows.rows.map((row) => (
-                  <button
-                    key={row.caseKey}
-                    type="button"
-                    onClick={() => setLaunchSelectedCaseKey(row.caseKey)}
-                    className={[
-                      "w-full rounded-2xl border p-4 text-left transition",
-                      launchSelectedCaseKeyEffective === row.caseKey ? "border-cyan-400/40 bg-cyan-400/10" : "border-white/10 bg-white/5 hover:bg-white/8",
-                    ].join(" ")}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="font-medium text-white">{row.testName}</p>
-                        <p className="mt-1 text-xs text-slate-400">{joinParts([row.className, row.groupName], "Sin clase o grupo")}</p>
-                      </div>
-                      <span className="rounded-full bg-white/5 px-3 py-1 text-xs text-slate-200">{formatNumber(row.executions)} ejec.</span>
-                    </div>
-                    <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
-                      <div className="rounded-xl bg-slate-950/60 px-3 py-2 text-slate-300">
-                        <p className="text-slate-500">Suite</p>
-                        <p className="mt-1 text-white">{row.suiteName}</p>
-                      </div>
-                      <div className="rounded-xl bg-slate-950/60 px-3 py-2 text-slate-300">
-                        <p className="text-slate-500">Última ejecución</p>
-                        <p className="mt-1 text-white">{formatExecutionTime(row.latestTimestamp || null)}</p>
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              <div className="mt-5 hidden max-w-full overflow-x-auto sm:block">
-                <table className="min-w-[760px] w-full border-separate border-spacing-0 text-sm">
-                  <thead>
-                    <tr className="text-left text-slate-400">
-                      <th className="border-b border-white/10 px-3 py-3">Caso</th>
-                      <th className="border-b border-white/10 px-3 py-3">Ejecuciones</th>
-                      <th className="hidden sm:table-cell border-b border-white/10 px-3 py-3">Suite</th>
-                      <th className="hidden md:table-cell border-b border-white/10 px-3 py-3">Última ejecución</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pagedLaunchRows.rows.map((row) => (
-                      <tr
-                        key={row.caseKey}
-                        className={[
-                          "cursor-pointer border-b border-white/5 transition hover:bg-white/5",
-                          launchSelectedCaseKeyEffective === row.caseKey ? "bg-cyan-400/10" : "",
-                        ].join(" ")}
-                        onClick={() => setLaunchSelectedCaseKey(row.caseKey)}
-                      >
-                        <td className="px-3 py-4 align-top text-white">
-                          <p className="font-medium">{row.testName}</p>
-                          <p className="mt-1 text-xs text-slate-400">{joinParts([row.className, row.groupName], "Sin clase o grupo")}</p>
-                        </td>
-                        <td className="px-3 py-4 align-top text-slate-300">{formatNumber(row.executions)}</td>
-                        <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{row.suiteName}</td>
-                        <td className="hidden md:table-cell px-3 py-4 align-top text-slate-300">
-                          <div className="flex flex-col gap-1">
-                            <span>{formatExecutionTime(row.latestTimestamp || null)}</span>
-                            {launchSelectedCaseKeyEffective === row.caseKey ? (
-                              <span className="inline-flex w-fit rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[0.7rem] uppercase tracking-[0.18em] text-cyan-100">
-                                {launchStatusLabel}
-                              </span>
-                            ) : null}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <PaginationControls
-                totalRows={pagedLaunchRows.totalRows}
-                page={pagedLaunchRows.currentPage}
-                totalPages={pagedLaunchRows.totalPages}
-                pageSize={launchPagination.pageSize}
-                onPageChange={(page) => setLaunchPagination((prev) => ({ ...prev, page }))}
-                onPageSizeChange={(pageSize) => setLaunchPagination({ page: 1, pageSize })}
-              />
-            </div>
-
-            <div className="min-w-0 rounded-[1.5rem] border border-white/10 bg-slate-950/55 p-4 sm:p-6">
-              <h3 className="text-lg font-semibold text-white">Acción</h3>
-              <p className="mt-1 text-sm text-slate-400">
-                {launchSelectedCaseRow ? launchSelectedCaseRow.testName : "Selecciona un caso para lanzar la ejecución"}
-              </p>
-
-              <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Test seleccionado</p>
-                <p className="mt-2 text-sm font-medium text-white">{launchSelectedCaseRow?.testName ?? "Sin selección"}</p>
-                <p className="mt-1 text-xs text-slate-400">{joinParts([launchSelectedCaseRow?.className, launchSelectedCaseRow?.groupName], "Sin clase o grupo")}</p>
-                <p className="mt-3 text-xs text-slate-500">El backend enviará este `test_name` al workflow de GitHub Actions.</p>
-              </div>
-
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Estado del workflow</p>
-                  <p className="mt-2 text-sm font-medium text-white">
-                    {launchWorkflowStatus || "Sin lanzamiento"}
-                  </p>
-                  <p className="mt-1 text-xs text-slate-400">
-                    {launchWorkflowConclusion ? `Conclusión: ${launchWorkflowConclusion}` : "Esperando lanzamiento."}
-                  </p>
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-semibold text-white">Prueba unitaria</h2>
+                  <p className="mt-1 text-sm text-slate-400">Elige un caso único y envía `test_name` al workflow `run-single-test.yml`.</p>
                 </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Última actualización</p>
-                  <p className="mt-2 text-sm font-medium text-white">
-                    {launchWorkflowUpdatedAt ? formatExecutionTime(launchWorkflowUpdatedAt) : "Sin datos"}
-                  </p>
-                  {launchWorkflowUrl ? (
-                    <a
-                      href={launchWorkflowUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-1 inline-block text-xs text-cyan-200 underline-offset-4 hover:underline"
-                    >
-                      Abrir en GitHub
-                    </a>
+                <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-100">Individual</span>
+              </div>
+
+              <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+                <div className="min-w-0">
+                  <div className="space-y-3 sm:hidden">
+                    {pagedLaunchRows.rows.map((row) => (
+                      <button
+                        key={row.caseKey}
+                        type="button"
+                        onClick={() => setLaunchSelectedCaseKey(row.caseKey)}
+                        className={[
+                          "w-full rounded-2xl border p-4 text-left transition",
+                          launchSelectedCaseKeyEffective === row.caseKey ? "border-cyan-400/40 bg-cyan-400/10" : "border-white/10 bg-white/5 hover:bg-white/8",
+                        ].join(" ")}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="break-words font-medium text-white">{row.testName}</p>
+                            <p className="mt-1 break-words text-xs text-slate-400">{joinParts([row.className, row.groupName], "Sin clase o grupo")}</p>
+                          </div>
+                          <span className="rounded-full bg-white/5 px-3 py-1 text-xs text-slate-200">{formatNumber(row.executions)} ejec.</span>
+                        </div>
+                        <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                          <div className="rounded-xl bg-slate-950/60 px-3 py-2 text-slate-300">
+                            <p className="text-slate-500">Suite</p>
+                            <p className="mt-1 break-words text-white">{row.suiteName}</p>
+                          </div>
+                          <div className="rounded-xl bg-slate-950/60 px-3 py-2 text-slate-300">
+                            <p className="text-slate-500">Última ejecución</p>
+                            <p className="mt-1 break-words text-white">{formatExecutionTime(row.latestTimestamp || null)}</p>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="hidden max-w-full overflow-x-auto sm:block">
+                    <table className="min-w-[760px] w-full border-separate border-spacing-0 text-sm">
+                      <thead>
+                        <tr className="text-left text-slate-400">
+                          <th className="border-b border-white/10 px-3 py-3">Caso</th>
+                          <th className="border-b border-white/10 px-3 py-3">Ejecuciones</th>
+                          <th className="hidden sm:table-cell border-b border-white/10 px-3 py-3">Suite</th>
+                          <th className="hidden md:table-cell border-b border-white/10 px-3 py-3">Última ejecución</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pagedLaunchRows.rows.map((row) => (
+                          <tr
+                            key={row.caseKey}
+                            className={[
+                              "cursor-pointer border-b border-white/5 transition hover:bg-white/5",
+                              launchSelectedCaseKeyEffective === row.caseKey ? "bg-cyan-400/10" : "",
+                            ].join(" ")}
+                            onClick={() => setLaunchSelectedCaseKey(row.caseKey)}
+                          >
+                            <td className="px-3 py-4 align-top break-words text-white">
+                              <p className="break-words font-medium">{row.testName}</p>
+                              <p className="mt-1 break-words text-xs text-slate-400">{joinParts([row.className, row.groupName], "Sin clase o grupo")}</p>
+                            </td>
+                            <td className="px-3 py-4 align-top text-slate-300">{formatNumber(row.executions)}</td>
+                            <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{row.suiteName}</td>
+                            <td className="hidden md:table-cell px-3 py-4 align-top text-slate-300">{formatExecutionTime(row.latestTimestamp || null)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <PaginationControls
+                    totalRows={pagedLaunchRows.totalRows}
+                    page={pagedLaunchRows.currentPage}
+                    totalPages={pagedLaunchRows.totalPages}
+                    pageSize={launchPagination.pageSize}
+                    onPageChange={(page) => setLaunchPagination((prev) => ({ ...prev, page }))}
+                    onPageSizeChange={(pageSize) => setLaunchPagination({ page: 1, pageSize })}
+                  />
+                </div>
+
+                <div className="min-w-0 rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Acción</p>
+                  <p className="mt-2 break-words text-sm font-medium text-white">{launchSelectedCaseRow?.testName ?? "Sin selección"}</p>
+                  <p className="mt-1 break-words text-xs text-slate-400">{joinParts([launchSelectedCaseRow?.className, launchSelectedCaseRow?.groupName], "Sin clase o grupo")}</p>
+                  <p className="mt-3 text-xs text-slate-500">Se enviará este `test_name` al backend y podrás seguir su estado en la tabla lateral.</p>
+
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/55 p-4">
+                      <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Estado</p>
+                      <p className="mt-2 break-words text-sm font-medium text-white">{launchStatusLabel(caseLaunch.status, caseLaunch.conclusion)}</p>
+                      <p className="mt-1 text-xs text-slate-400">{caseLaunch.conclusion ? `Conclusión: ${caseLaunch.conclusion}` : "Esperando lanzamiento."}</p>
+                    </div>
+                  <div className="rounded-2xl border border-white/10 bg-slate-950/55 p-4">
+                    <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Actualizado</p>
+                    <p className="mt-2 break-words text-sm font-medium text-white">{caseLaunch.updatedAt ? formatExecutionTime(caseLaunch.updatedAt) : "Sin datos"}</p>
+                    {caseLaunch.artifactId && !caseLaunch.artifactExpired ? (
+                      <a href={caseLaunch.url || githubArtifactDownloadHref(caseLaunch.artifactId, caseLaunch.artifactName || "workflow-artifact")} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs text-cyan-200 underline-offset-4 hover:underline">
+                        Abrir informe
+                      </a>
+                    ) : (
+                      <p className="mt-1 text-xs text-slate-500">El acceso al informe se habilita cuando el workflow genera un artifact.</p>
+                    )}
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/55 p-4">
+                    <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Informe</p>
+                    {caseLaunch.artifactId && !caseLaunch.artifactExpired ? (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-100">
+                          {caseLaunch.artifactName || "Artifact disponible"}
+                        </span>
+                        <a href={githubArtifactDownloadHref(caseLaunch.artifactId, caseLaunch.artifactName || "workflow-artifact")} className={reportButtonClassName("download")}>
+                          {reportActionContent("Descarga")}
+                        </a>
+                      </div>
+                    ) : caseLaunch.status === "completed" ? (
+                      <p className="mt-2 break-words text-sm text-slate-300">El workflow terminó, pero no se generó informe descargable.</p>
+                    ) : (
+                      <p className="mt-2 break-words text-sm text-slate-300">El informe aparecerá aquí si el workflow lo genera.</p>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={launchSelectedCase}
+                    disabled={caseLaunch.launching || !launchSelectedCaseRow}
+                    className="mt-4 inline-flex w-full items-center justify-center rounded-full border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {caseLaunch.launching ? "Lanzando..." : "Lanzar ejecución"}
+                  </button>
+
+                  {caseLaunch.success ? (
+                    <p className="mt-3 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">{caseLaunch.success}</p>
+                  ) : null}
+
+                  {caseLaunch.error ? (
+                    <p className="mt-3 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{caseLaunch.error}</p>
                   ) : null}
                 </div>
               </div>
 
-              <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Informe</p>
-                {launchWorkflowArtifactId && !launchWorkflowArtifactExpired ? (
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-100">
-                      {launchWorkflowArtifactName || "Artifact disponible"}
-                    </span>
-                    <a
-                      href={githubArtifactDownloadHref(launchWorkflowArtifactId, launchWorkflowArtifactName || "workflow-artifact")}
-                      className={reportButtonClassName("download")}
-                    >
-                      {reportActionContent("Descarga")}
-                    </a>
-                  </div>
-                ) : launchWorkflowStatus === "completed" ? (
-                  <p className="mt-2 text-sm text-slate-300">El workflow terminó, pero no se generó informe descargable.</p>
-                ) : (
-                  <p className="mt-2 text-sm text-slate-300">El informe aparecerá aquí si el workflow lo genera.</p>
-                )}
+              <LaunchHistoryTable title="Historial de lanzamientos unitarios" rows={caseLaunch.history} emptyText="No hay lanzamientos unitarios todavía." />
+            </div>
+
+            <div className="min-w-0 rounded-[1.5rem] border border-white/10 bg-slate-950/55 p-4 sm:p-6">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-semibold text-white">Suite / grupo</h2>
+                  <p className="mt-1 text-sm text-slate-400">Elige una suite para enviar `test_groups` al workflow `run-groups.yml`.</p>
+                </div>
+                <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-100">Grupo</span>
               </div>
 
-              <button
-                type="button"
-                onClick={launchSelectedCase}
-                disabled={launchingTest || !launchSelectedCaseRow}
-                className="mt-4 inline-flex w-full items-center justify-center rounded-full border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {launchingTest ? "Lanzando..." : "Lanzar ejecución"}
-              </button>
+              <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+                <div className="min-w-0">
+                  <div className="space-y-3 sm:hidden">
+                    {pagedSuiteRows.rows.map((suite) => {
+                      const selected = launchSelectedSuiteNameEffective === suite.suiteName;
 
-              {launchSuccess ? (
-                <p className="mt-3 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                  {launchSuccess}
-                </p>
-              ) : null}
+                      return (
+                        <button
+                          key={suite.suiteName}
+                          type="button"
+                          onClick={() => selectLaunchSuite(suite.suiteName)}
+                          className={[
+                            "w-full rounded-2xl border p-4 text-left transition",
+                            selected ? "border-cyan-400/40 bg-cyan-400/10" : "border-white/10 bg-white/5 hover:bg-white/8",
+                          ].join(" ")}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="break-words font-medium text-white">{suite.suiteName}</p>
+                              <p className="mt-1 break-words text-xs text-slate-400">
+                                {formatNumber(suite.executions)} ejecuciones · {formatNumber(suite.cases)} casos
+                              </p>
+                            </div>
+                            <span className="rounded-full bg-white/5 px-3 py-1 text-xs text-slate-200">{selected ? "Seleccionada" : "Tocar para elegir"}</span>
+                          </div>
+                          <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                            <div className="rounded-xl bg-slate-950/60 px-3 py-2 text-slate-300">
+                              <p className="text-slate-500">Promedio</p>
+                              <p className="mt-1 break-words text-white">{formatDurationLabel(suite.averageDuration)}</p>
+                            </div>
+                            <div className="rounded-xl bg-slate-950/60 px-3 py-2 text-slate-300">
+                              <p className="text-slate-500">Última ejecución</p>
+                              <p className="mt-1 break-words text-white">{formatExecutionTime(suite.latestTimestamp || null)}</p>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-              {launchError ? (
-                <p className="mt-3 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
-                  {launchError}
-                </p>
-              ) : null}
+                  <div className="hidden max-w-full overflow-x-auto sm:block">
+                    <table className="min-w-[760px] w-full border-separate border-spacing-0 text-sm">
+                      <thead>
+                        <tr className="text-left text-slate-400">
+                          <th className="border-b border-white/10 px-3 py-3">Suite</th>
+                          <th className="border-b border-white/10 px-3 py-3">Ejecuciones</th>
+                          <th className="hidden sm:table-cell border-b border-white/10 px-3 py-3">Casos</th>
+                          <th className="hidden md:table-cell border-b border-white/10 px-3 py-3">Duración promedio</th>
+                          <th className="hidden md:table-cell border-b border-white/10 px-3 py-3">Última ejecución</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pagedSuiteRows.rows.map((suite) => {
+                          const selected = launchSelectedSuiteNameEffective === suite.suiteName;
+
+                          return (
+                            <tr
+                              key={suite.suiteName}
+                              className={[
+                                "cursor-pointer border-b border-white/5 transition hover:bg-white/5",
+                                selected ? "bg-cyan-400/10" : "",
+                              ].join(" ")}
+                              onClick={() => selectLaunchSuite(suite.suiteName)}
+                            >
+                              <td className="px-3 py-4 align-top break-words text-white">
+                                <p className="break-words font-medium">{suite.suiteName}</p>
+                              </td>
+                              <td className="px-3 py-4 align-top text-slate-300">{formatNumber(suite.executions)}</td>
+                              <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{formatNumber(suite.cases)}</td>
+                              <td className="hidden md:table-cell px-3 py-4 align-top text-slate-300">{formatDurationLabel(suite.averageDuration)}</td>
+                              <td className="hidden md:table-cell px-3 py-4 align-top text-slate-300">{formatExecutionTime(suite.latestTimestamp || null)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <PaginationControls
+                    totalRows={pagedSuiteRows.totalRows}
+                    page={pagedSuiteRows.currentPage}
+                    totalPages={pagedSuiteRows.totalPages}
+                    pageSize={suitePagination.pageSize}
+                    onPageChange={(page) => setSuitePagination((prev) => ({ ...prev, page }))}
+                    onPageSizeChange={(pageSize) => setSuitePagination({ page: 1, pageSize })}
+                  />
+                </div>
+
+                <div className="min-w-0 rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Acción</p>
+                  <p className="mt-2 break-words text-sm font-medium text-white">{launchSelectedSuiteRow?.suiteName ?? "Sin selección"}</p>
+                  <p className="mt-1 break-words text-xs text-slate-400">
+                    {launchSelectedSuiteRow
+                      ? `${formatNumber(launchSelectedSuiteRow.executions)} ejecuciones históricas, ${formatNumber(launchSelectedSuiteRow.cases)} casos`
+                      : "Selecciona una suite para continuar"}
+                  </p>
+                  <p className="mt-3 text-xs text-slate-500">Se enviará esta suite como `test_groups` y podrás revisar su estado en la tabla lateral.</p>
+
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/55 p-4">
+                      <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Estado</p>
+                      <p className="mt-2 break-words text-sm font-medium text-white">{launchStatusLabel(suiteLaunch.status, suiteLaunch.conclusion)}</p>
+                      <p className="mt-1 text-xs text-slate-400">{suiteLaunch.conclusion ? `Conclusión: ${suiteLaunch.conclusion}` : "Esperando lanzamiento."}</p>
+                    </div>
+                  <div className="rounded-2xl border border-white/10 bg-slate-950/55 p-4">
+                    <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Actualizado</p>
+                    <p className="mt-2 break-words text-sm font-medium text-white">{suiteLaunch.updatedAt ? formatExecutionTime(suiteLaunch.updatedAt) : "Sin datos"}</p>
+                    {suiteLaunch.artifactId && !suiteLaunch.artifactExpired ? (
+                      <a href={suiteLaunch.url || githubArtifactDownloadHref(suiteLaunch.artifactId, suiteLaunch.artifactName || "workflow-artifact")} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs text-cyan-200 underline-offset-4 hover:underline">
+                        Abrir informe
+                      </a>
+                    ) : (
+                      <p className="mt-1 text-xs text-slate-500">El acceso al informe se habilita cuando el workflow genera un artifact.</p>
+                    )}
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/55 p-4">
+                    <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Informe</p>
+                    {suiteLaunch.artifactId && !suiteLaunch.artifactExpired ? (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-100">
+                          {suiteLaunch.artifactName || "Artifact disponible"}
+                        </span>
+                        <a href={githubArtifactDownloadHref(suiteLaunch.artifactId, suiteLaunch.artifactName || "workflow-artifact")} className={reportButtonClassName("download")}>
+                          {reportActionContent("Descarga")}
+                        </a>
+                      </div>
+                    ) : suiteLaunch.status === "completed" ? (
+                      <p className="mt-2 break-words text-sm text-slate-300">El workflow terminó, pero no se generó informe descargable.</p>
+                    ) : (
+                      <p className="mt-2 break-words text-sm text-slate-300">El informe aparecerá aquí si el workflow lo genera.</p>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={launchSelectedSuite}
+                    disabled={suiteLaunch.launching || !launchSelectedSuiteRow}
+                    className="mt-4 inline-flex w-full items-center justify-center rounded-full border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {suiteLaunch.launching ? "Lanzando..." : "Lanzar suite"}
+                  </button>
+
+                  {suiteLaunch.success ? (
+                    <p className="mt-3 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">{suiteLaunch.success}</p>
+                  ) : null}
+
+                  {suiteLaunch.error ? (
+                    <p className="mt-3 rounded-2xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">{suiteLaunch.error}</p>
+                  ) : null}
+                </div>
+              </div>
+
+              <LaunchHistoryTable title="Historial de lanzamientos de suites" rows={suiteLaunch.history} emptyText="No hay lanzamientos de suite todavía." />
             </div>
           </section>
         ) : null}
@@ -1468,23 +2022,23 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                   <div key={row.id} className="rounded-2xl border border-white/10 bg-white/5 p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <p className="font-medium text-white">{row.title}</p>
-                        <p className="mt-1 text-xs text-slate-400">{row.subtitle}</p>
+                        <p className="break-words font-medium text-white">{row.title}</p>
+                        <p className="mt-1 break-words text-xs text-slate-400">{row.subtitle}</p>
                       </div>
                       {renderStatusBadge(row.status)}
                     </div>
                     <div className="mt-3 grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
                       <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                         <p className="text-slate-500">Suite</p>
-                        <p className="mt-1 text-white">{row.suiteName}</p>
+                        <p className="mt-1 break-words text-white">{row.suiteName}</p>
                       </div>
                       <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                         <p className="text-slate-500">Duración</p>
-                        <p className="mt-1 text-white">{formatDurationLabel(row.duration)}</p>
+                        <p className="mt-1 break-words text-white">{formatDurationLabel(row.duration)}</p>
                       </div>
                       <div className="rounded-xl bg-slate-950/60 px-3 py-2 col-span-2">
                         <p className="text-slate-500">Fecha</p>
-                        <p className="mt-1 text-white">{formatExecutionTime(row.timestamp || null)}</p>
+                        <p className="mt-1 break-words text-white">{formatExecutionTime(row.timestamp || null)}</p>
                       </div>
                     </div>
                   </div>
@@ -1506,13 +2060,13 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                     {pagedExecutionHistory.rows.map((row) => (
                       <tr key={row.id} className="border-b border-white/5">
                         <td className="px-3 py-4 align-top text-white">
-                          <p className="font-medium">{row.title}</p>
-                          <p className="mt-1 text-xs text-slate-400">{row.subtitle}</p>
+                          <p className="break-words font-medium">{row.title}</p>
+                          <p className="mt-1 break-words text-xs text-slate-400">{row.subtitle}</p>
                         </td>
-                        <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{row.suiteName}</td>
+                        <td className="hidden sm:table-cell px-3 py-4 align-top break-words text-slate-300">{row.suiteName}</td>
                         <td className="px-3 py-4 align-top">{renderStatusBadge(row.status)}</td>
-                        <td className="hidden md:table-cell px-3 py-4 align-top text-slate-300">{formatDurationLabel(row.duration)}</td>
-                        <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{formatExecutionTime(row.timestamp || null)}</td>
+                        <td className="hidden md:table-cell px-3 py-4 align-top break-words text-slate-300">{formatDurationLabel(row.duration)}</td>
+                        <td className="hidden sm:table-cell px-3 py-4 align-top break-words text-slate-300">{formatExecutionTime(row.timestamp || null)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1627,27 +2181,27 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                 <div key={execution.id} className="rounded-2xl border border-white/10 bg-white/5 p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="font-medium text-white">{execution.xml_test_name ?? "Sin suite"}</p>
-                      <p className="mt-1 text-xs text-slate-400">{execution.browser ?? "Sin browser"}</p>
+                        <p className="break-words font-medium text-white">{execution.xml_test_name ?? "Sin suite"}</p>
+                        <p className="mt-1 break-words text-xs text-slate-400">{execution.browser ?? "Sin browser"}</p>
                     </div>
                     {renderStatusBadge(normalizeExecutionVerdict(execution.verdict))}
                   </div>
                   <div className="mt-3 grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
                     <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                       <p className="text-slate-500">Tests</p>
-                      <p className="mt-1 text-white">{formatNumber(execution.totalTests)}</p>
+                      <p className="mt-1 break-words text-white">{formatNumber(execution.totalTests)}</p>
                     </div>
                     <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                       <p className="text-slate-500">Aprobacion</p>
-                      <p className="mt-1 text-white">{formatPercent(execution.approval)}</p>
+                      <p className="mt-1 break-words text-white">{formatPercent(execution.approval)}</p>
                     </div>
                     <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                       <p className="text-slate-500">Duracion</p>
-                      <p className="mt-1 text-white">{formatDurationLabel(execution.duration)}</p>
+                      <p className="mt-1 break-words text-white">{formatDurationLabel(execution.duration)}</p>
                     </div>
                     <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                       <p className="text-slate-500">Fecha</p>
-                      <p className="mt-1 text-white">{formatExecutionTime(execution.timestamp || null)}</p>
+                      <p className="mt-1 break-words text-white">{formatExecutionTime(execution.timestamp || null)}</p>
                     </div>
                   </div>
                   <div className="mt-3">
@@ -1685,13 +2239,13 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                 <tbody>
                     {pagedExecutionRows.rows.map((execution) => (
                     <tr key={execution.id} className="border-b border-white/5">
-                      <td className="px-3 py-4 align-top text-white">{execution.xml_test_name ?? "Sin suite"}</td>
-                      <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{execution.browser ?? "Sin browser"}</td>
+                      <td className="px-3 py-4 align-top break-words text-white">{execution.xml_test_name ?? "Sin suite"}</td>
+                      <td className="hidden sm:table-cell px-3 py-4 align-top break-words text-slate-300">{execution.browser ?? "Sin browser"}</td>
                       <td className="px-3 py-4 align-top">{renderStatusBadge(normalizeExecutionVerdict(execution.verdict))}</td>
-                      <td className="hidden md:table-cell px-3 py-4 align-top text-slate-300">{formatNumber(execution.totalTests)}</td>
-                      <td className="hidden md:table-cell px-3 py-4 align-top text-slate-300">{formatPercent(execution.approval)}</td>
-                      <td className="hidden lg:table-cell px-3 py-4 align-top text-slate-300">{formatDurationLabel(execution.duration)}</td>
-                      <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{formatExecutionTime(execution.timestamp || null)}</td>
+                      <td className="hidden md:table-cell px-3 py-4 align-top break-words text-slate-300">{formatNumber(execution.totalTests)}</td>
+                      <td className="hidden md:table-cell px-3 py-4 align-top break-words text-slate-300">{formatPercent(execution.approval)}</td>
+                      <td className="hidden lg:table-cell px-3 py-4 align-top break-words text-slate-300">{formatDurationLabel(execution.duration)}</td>
+                      <td className="hidden sm:table-cell px-3 py-4 align-top break-words text-slate-300">{formatExecutionTime(execution.timestamp || null)}</td>
                       <td className="px-3 py-4 align-top">
                         {execution.report_url ? (
                           <div className="flex flex-wrap gap-2">
@@ -1743,15 +2297,15 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                 <div key={execution.id} className="rounded-2xl border border-white/10 bg-white/5 p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="font-medium text-white">{execution.xml_test_name ?? "Sin suite"}</p>
-                      <p className="mt-1 text-xs text-slate-400">{execution.browser ?? "Sin browser"}</p>
+                        <p className="break-words font-medium text-white">{execution.xml_test_name ?? "Sin suite"}</p>
+                        <p className="mt-1 break-words text-xs text-slate-400">{execution.browser ?? "Sin browser"}</p>
                     </div>
                     {renderStatusBadge(normalizeExecutionVerdict(execution.verdict))}
                   </div>
                   <div className="mt-3 grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
                     <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                       <p className="text-slate-500">Duracion</p>
-                      <p className="mt-1 text-white">{formatDurationLabel(execution.duration)}</p>
+                      <p className="mt-1 break-words text-white">{formatDurationLabel(execution.duration)}</p>
                     </div>
                     <div className="rounded-xl bg-slate-950/60 px-3 py-2">
                       <p className="text-slate-500">Suite</p>
@@ -1790,10 +2344,10 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
                 <tbody>
                     {pagedFailureExecutionRows.rows.map((execution) => (
                     <tr key={execution.id} className="border-b border-white/5">
-                      <td className="px-3 py-4 align-top text-white">{execution.xml_test_name ?? "Sin suite"}</td>
-                      <td className="hidden sm:table-cell px-3 py-4 align-top text-slate-300">{execution.browser ?? "Sin browser"}</td>
+                      <td className="px-3 py-4 align-top break-words text-white">{execution.xml_test_name ?? "Sin suite"}</td>
+                      <td className="hidden sm:table-cell px-3 py-4 align-top break-words text-slate-300">{execution.browser ?? "Sin browser"}</td>
                       <td className="px-3 py-4 align-top">{renderStatusBadge(normalizeExecutionVerdict(execution.verdict))}</td>
-                      <td className="hidden md:table-cell px-3 py-4 align-top text-slate-300">{formatDurationLabel(execution.duration)}</td>
+                      <td className="hidden md:table-cell px-3 py-4 align-top break-words text-slate-300">{formatDurationLabel(execution.duration)}</td>
                       <td className="px-3 py-4 align-top">
                         {execution.report_url ? (
                           <div className="flex flex-wrap gap-2">
@@ -1830,6 +2384,12 @@ export default function DashboardShell({ data }: { data: DashboardData }) {
               />
             </section>
         ) : null}
+
+        <footer className="mt-4 rounded-[1.5rem] border border-white/10 bg-slate-950/50 px-5 py-4 text-center text-xs text-slate-400 sm:px-6">
+          <p className="break-words">
+            Página de prueba creada con IA. Derechos reservados por Jeremy Burgos.
+          </p>
+        </footer>
       </div>
 
       {previewUrl ? (
